@@ -18,7 +18,6 @@ import { recipes } from "programming-game/recipes";
 import { spellMap } from "programming-game/spells";
 import { weaponSkills } from "programming-game/weapon-skills";
 
-import { offers } from "./offers";
 import {
   heavilyEncumberedWeight,
   maxCalories,
@@ -32,17 +31,20 @@ import {
 } from "programming-game/types";
 
 config({
-  path: ".env",
+  path: ".env.mule",
 });
+
+const MAIN_PLAYER_ID = "player_SvVKiOnygv9JfOmzCLdOU"; // Chickentuna
+const MULE_PLAYER_ID = "player_OsOeqiE9JXevJZ8IHRt_m"; // Eldoradope
 
 interface Context {
   player: OnTickCurrentPlayer;
   units: Record<string, ClientSideUnit>;
   items: Record<Items, ItemDefinition>;
-  myItems: Items[];
   inArena: boolean;
   currentWeight: number;
   heartbeat: TickHeartbeat;
+  isMule: boolean;
 }
 
 const assertEnv = (key: string): string => {
@@ -76,49 +78,99 @@ function getCurrentWeight(
 function getTickAction(heartbeat: TickHeartbeat): Intent | void {
   const { player, units, items } = heartbeat;
   if (!player) return;
-  const myItems = Object.keys(player.inventory) as Items[];
+
   const inArena = heartbeat.inArena;
   const currentWeight = getCurrentWeight(player.inventory, items);
   const context: Context = {
     player,
     units,
     items,
-    myItems,
     inArena,
     heartbeat,
     currentWeight,
+    isMule: process.env.IS_MULE === "true",
   };
   let a: Intent | void;
 
   if (!inArena) {
     a = doRespawn(context);
     if (a) return a;
-    doCheckHealth(context);
+
+    checkHealth(context);
+
     a = doEat(context);
     if (a) return a;
     if (isAtSpawn(context)) {
-      a = doSellTrash(context);
-      if (a) return a;
-      a = doEquipItems(context);
-      if (a) return a;
-      a = doBuyItems(context);
-      if (a) return a;
-      a = doCraftItems(context);
+      a =
+        doSellTrash(context) ??
+        doEquipItems(context) ??
+        doBuyItems(context) ??
+        doCraftItems(context);
       if (a) return a;
     }
-    doCheckHealth(context);
-    a = doDropExcessItems(context);
-    if (a) return a;
-    a = doEscapeToSpawn(context);
+    checkHealth(context);
+
+    a = doDropExcessItems(context) ?? doEscapeToSpawn(context);
     if (a) return a;
   }
-  a = doHunt(context);
+  a = doHunt(context); // ?? doTrade(context);
   if (a) return a;
   a = doGoToWilderness(context);
   if (a) return a;
 }
 
-function doCraftItems({ player, items, myItems }: Context): Intent | void {
+function doTrade({ player, isMule, units, items }: Context): Intent | void {
+  // start sending money to main in enough at least 10 coins
+  if (isMule && player.inventory.copperCoin! >= 10) {
+    // Is Chickentuna in vicinity?
+    const chickentuna = units[MAIN_PLAYER_ID];
+    if (chickentuna) {
+      if (!player.trades.offers.feather) {
+        return player.setTrade({
+          wants: {
+            feather: 600,
+          },
+          offers: {
+            feather: 0,
+          },
+        });
+      }
+
+      // Follow him
+      return player.move({
+        x: chickentuna.position.x,
+        y: chickentuna.position.y,
+      });
+    } else {
+      // Approach him
+      return player.attack(MAIN_PLAYER_ID);
+    }
+  } else {
+    // Is Eldoradope in vicinity?
+    const mule = units[MULE_PLAYER_ID];
+    if (mule) {
+      // Note: it seems impossible to give money
+      if (!player.trades.offers.feather) {
+        return player.setTrade({
+          wants: {
+            copperCoin: 0,
+          },
+          offers: {
+            feather: 600,
+          },
+        });
+      } else {
+        return player.sell("feather", 0, MULE_PLAYER_ID);
+      }
+    }
+  }
+}
+
+function doCraftItems({ player, items, isMule }: Context): Intent | void {
+  if (isMule) {
+    return;
+  }
+
   const wishList: CopperArmor[] = [
     "copperMailHelm",
     "copperMailChest",
@@ -131,8 +183,8 @@ function doCraftItems({ player, items, myItems }: Context): Intent | void {
 
     if (
       !player.equipment[type] &&
-      myItems.includes("anvil") &&
-      myItems.includes("furnace")
+      player.inventory.anvil &&
+      player.inventory.furnace
     ) {
       // Craft wished if we have enough copper coins
       let ingotsPerWished = recipes[wish].input.copperIngot;
@@ -160,19 +212,29 @@ function doCraftItems({ player, items, myItems }: Context): Intent | void {
   }
 }
 
-function doRespawn({ player }: Context): Intent | void {
+function doRespawn({ player, heartbeat }: Context): Intent | void {
   if (player.hp <= 0) {
     console.log("I died on:", new Date().toISOString());
+    console.log(
+      "Other units around:",
+      Object.values(heartbeat.units).map((u) => u.name)
+    );
+    console.log("Coins lost:", player.inventory.copperCoin ?? 0);
     reset();
     return player.respawn();
   }
 }
 
-function doCheckHealth({ player }: Context) {
+function checkHealth({ player, ...context }: Context) {
   if (player.hp < 30) {
     awaitFullHeal = true;
   }
-  if (player.hp >= 100) {
+
+  // Fully healed or healed enough to battle on
+  if (
+    player.hp >= 100 ||
+    (!isAtSpawn({ player, ...context }) && player.hp >= 75)
+  ) {
     awaitFullHeal = false;
   }
 }
@@ -247,28 +309,33 @@ function doEquipItems({ player, items }: Context): Intent | void {
   }
 }
 
-function doBuyItems({ player }: Context): Intent | void {
+function doBuyItems({ player, items, isMule }: Context): Intent | void {
   if (
     !player.equipment.weapon &&
-    player.inventory.copperCoin! >= offers.guard_name.copperSword
+    player.inventory.copperCoin! >= items.copperSword.buyFromVendorPrice
   ) {
     return player.buy("copperSword", 1, "guard_name");
   }
+
+  if (isMule) {
+    return;
+  }
+
   if (
     !player.equipment.offhand &&
-    player.inventory.copperCoin! >= offers.healer_name.woodenShield
+    player.inventory.copperCoin! >= items.woodenShield.buyFromVendorPrice
   ) {
     return player.buy("woodenShield", 1, "healer_name");
   }
   if (
     !player.inventory.furnace &&
-    player.inventory.copperCoin! >= offers.healer_name.furnace
+    player.inventory.copperCoin! >= items.furnace.buyFromVendorPrice
   ) {
     return player.buy("furnace", 1, "healer_name");
   }
   if (
     !player.inventory.anvil &&
-    player.inventory.copperCoin! >= offers.healer_name.anvil
+    player.inventory.copperCoin! >= items.anvil.buyFromVendorPrice
   ) {
     return player.buy("anvil", 1, "healer_name");
   }
@@ -288,10 +355,13 @@ function doDropExcessItems({ player, items }: Context): Intent | void {
       }
     }
   }
+  if (player.inventory["aid_digestion"]) {
+    return player.drop("aid_digestion", 0);
+  }
 }
 
 function doEscapeToSpawn({ player, currentWeight }: Context): Intent | void {
-  if (awaitFullHeal || currentWeight >= heavilyEncumberedWeight) {
+  if (awaitFullHeal || currentWeight >= heavilyEncumberedWeight + 10_000) {
     return player.move({ x: 0, y: 0 });
   }
 }
@@ -300,7 +370,9 @@ function doHunt({ player, units, items, heartbeat }: Context): Intent | void {
   for (const [k, v] of Object.entries(units)) {
     if (
       v.type === "monster" ||
-      (v.intent?.type === IntentType.attack && v.intent.target === player.id)
+      (v.intent?.type === IntentType.attack &&
+        v.intent.target === player.id &&
+        v.hp > 0)
     ) {
       if (!player.equipment.weapon && player.tp >= weaponSkills.combo.tpCost) {
         return player.useWeaponSkill("combo", k);
@@ -318,11 +390,16 @@ function doHunt({ player, units, items, heartbeat }: Context): Intent | void {
   }
 }
 
-function doGoToWilderness({ player, ...context }: Context): Intent | void {
-    if (player.equipment.weapon && player.equipment.offhand) {
-      return player.move({ x: 400, y: 0 });
-    }
-    return player.move({ x: 40, y: 0 });
+function doGoToWilderness({ player, isMule }: Context): Intent | void {
+  if (player.equipment.weapon && player.equipment.offhand) {
+    return player.move({ x: 100, y: 0 });
+  }
+
+  if (isMule) {
+    return player.move({ x: -50, y: 0 });
+  }
+
+  return player.move({ x: 50, y: 0 });
 }
 
 let prevTickAction: Intent | void;
@@ -337,7 +414,7 @@ connect({
     return action;
   },
   onEvent(instance, charId, eventName, evt) {
-    //   console.log(`Event received from ${instance} for ${charId}: ${eventName}`, evt);
+    //   og(`Event received from ${instance} for ${charId}: ${eventName}`, evt);
   },
 });
 
@@ -345,3 +422,4 @@ connect({
 // Z4KF5LPvsJsCDWNuZRkZN is Tyr
 // QztHfF0s9_NUlRwD68Kim is Hmmmm?
 // player_SvVKiOnygv9JfOmzCLdOU is me
+// player_OsOeqiE9JXevJZ8IHRt_m is mule
