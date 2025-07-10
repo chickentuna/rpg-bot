@@ -179,7 +179,7 @@ function doCraftItems({ player, items, isMule }: Context): Intent | void {
     "copperMailLegs",
   ];
   for (const wish of wishList) {
-    const type = items.copperMailChest.type as ArmorType;
+    const type = items[wish].type as ArmorType;
 
     if (
       !player.equipment[type] &&
@@ -264,12 +264,10 @@ function doSellTrash({ player, items }: Context): Intent | void {
     const itemCount = player.inventory[itemKey as Items] ?? 0;
     if (
       itemCount > 0 &&
-      ["trash", "food"].includes(item.type) &&
+      (["trash", "food"].includes(item.type) ||
+        (player.equipment.feet && item.type === "feet")) &&
       !item.name.includes("coin") &&
-      item.id != "furnace" &&
-      item.id != "chunkOfCopper" &&
-      item.id != "copperIngot" &&
-      item.id != "anvil"
+      !["furnace", "chunkOfCopper", "copperIngot", "anvil"].includes(item.id)
     ) {
       return player.sell(item.id, 0, "healer_name");
     }
@@ -387,14 +385,24 @@ function doEscapeToSpawn({ player, currentWeight }: Context): Intent | void {
   }
 }
 
-function doHunt({ player, units, items, heartbeat }: Context): Intent | void {
+function doHunt({
+  inArena,
+  player,
+  units,
+  items,
+  heartbeat,
+}: Context): Intent | void {
   for (const [k, v] of Object.entries(units)) {
-    if (
-      v.type === "monster" ||
-      (v.intent?.type === IntentType.attack &&
-        v.intent.target === player.id &&
-        v.hp > 0)
-    ) {
+    if (v.hp <= 0) {
+      continue; // Skip dead units
+    }
+    if (v.id === player.id) {
+      continue; // Skip self
+    }
+    const attackingMe =
+      v.intent?.type === IntentType.attack && v.intent.target === player.id;
+
+    if (inArena || v.type === "monster" || attackingMe) {
       if (
         !player.equipment.weapon &&
         player.tp >= weaponSkills.haymaker.tpCost
@@ -406,11 +414,10 @@ function doHunt({ player, units, items, heartbeat }: Context): Intent | void {
         items[player.equipment.weapon!]?.type === "oneHandedSword" &&
         player.tp >= weaponSkills.doubleSlash.tpCost
       ) {
-        // In case of server desync, use skill only 60% of the times
-        if (Math.random() < 0.6) {
+        // In case of server desync, use skill only 90% of the times
+        if (Math.random() < 0.9) {
           return player.useWeaponSkill("doubleSlash", k);
         }
-        
       }
 
       return player.attack(k);
@@ -420,11 +427,11 @@ function doHunt({ player, units, items, heartbeat }: Context): Intent | void {
 
 function doGoToWilderness({ player, isMule }: Context): Intent | void {
   if (player.equipment.weapon && player.equipment.offhand) {
-    return player.move({ x: 80, y: 0 });
+    return player.move({ x: 35, y: 0 }); // 35 because Tyr is stuck, we can ninja all his loot
   }
 
   if (isMule) {
-    return player.move({ x: 35, y: 0 });
+    return player.move({ x: -30, y: 0 });
   }
 
   return player.move({ x: 50, y: 0 });
@@ -446,7 +453,9 @@ connect({
           "tp=",
           heartbeat.player.tp,
           "hp=",
-          heartbeat.player.hp
+          heartbeat.player.hp,
+          // 'lastAction=',
+          // heartbeat.player.lastAction, heartbeat.player.lastUpdate
         );
       }
       prevTickAction = action;

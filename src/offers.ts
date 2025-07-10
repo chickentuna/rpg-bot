@@ -20,4 +20,3 @@ export const offers = {
   },
   wants: {}
 }
-//TODO: kite the guard with bow to kill the merchant
