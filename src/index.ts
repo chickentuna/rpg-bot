@@ -5,6 +5,7 @@ import {
   TickHeartbeat,
 } from "programming-game";
 import { config } from "dotenv";
+import fs from "fs";
 import {
   Boots,
   Chests,
@@ -13,6 +14,7 @@ import {
   ItemDefinition,
   Items,
   Legs,
+  WeaponType,
 } from "programming-game/items";
 import { recipes } from "programming-game/recipes";
 import { spellMap } from "programming-game/spells";
@@ -24,16 +26,19 @@ import {
   maxCarryWeight,
 } from "programming-game/constants";
 import {
+  ClientSideNPC,
   ClientSidePlayer,
   ClientSideUnit,
   Intent,
   IntentType,
+  NPC_IDS,
 } from "programming-game/types";
 
 config({
   path: ".env.mule",
 });
 
+const MAX_QUESTS = 5;
 const MAIN_PLAYER_ID = "player_SvVKiOnygv9JfOmzCLdOU"; // Chickentuna
 const MULE_PLAYER_ID = "player_OsOeqiE9JXevJZ8IHRt_m"; // Eldoradope
 
@@ -60,6 +65,7 @@ const assertEnv = (key: string): string => {
 let awaitFullHeal = false;
 
 function reset() {
+  prevTickActions = [];
   awaitFullHeal = false;
 }
 
@@ -98,27 +104,141 @@ function getTickAction(heartbeat: TickHeartbeat): Intent | void {
 
     checkHealth(context);
 
-    a = doEat(context);
+    a = doEat(context) ?? doRegenTP(context) ?? doEquipItems(context);
     if (a) return a;
     if (isAtSpawn(context)) {
+      recordNPCData(context);
       a =
+        doBank(context) ??
+        doQuests(context) ??
         doSellTrash(context) ??
-        doEquipItems(context) ??
         doBuyItems(context) ??
         doCraftItems(context);
       if (a) return a;
     }
     checkHealth(context);
 
-    a = doDropExcessItems(context) ?? doEscapeToSpawn(context);
+    a =
+      doSetSpellStones(context) ??
+      doDropExcessItems(context) ??
+      doEscapeToSpawn(context);
+      
     if (a) return a;
   }
-  a = doHunt(context) ?? doTrade(context);
-  if (a) return a;
-  a = doGoToWilderness(context);
+  a = doHunt(context) ?? /*doTrade(context) ??*/ doGoToWilderness(context);
   if (a) return a;
 }
 
+
+function doBank({ player, units, items, isMule }: Context): Intent | void {
+  if (player.inventory.copperCoin! >= 30000) {
+    let banker = Object.values(units).find(unit => {
+      return unit.type === 'npc' && unit.banker;
+    });
+    if (!banker) {
+      return;
+    }
+    banker = banker as ClientSideNPC;
+    
+    return player.deposit(banker, {"copperCoin": 30000});
+  }
+}
+
+function count(obj: any): number {
+  return Object.keys(obj).length;
+}
+function every<T>(obj: Record<string, T>): T[] {
+  return obj == null ? [] : Object.values(obj);
+}
+
+let NPC_DATA: ClientSideNPC[] = [];
+
+function recordNPCData({ isMule, units }: Context) {
+  if (!isMule) {
+    return;
+  }
+
+  const npcs = every(units).filter((u) => u.npc) as ClientSideNPC[];
+  if (JSON.stringify(npcs) === JSON.stringify(NPC_DATA)) {
+    return;
+  }
+  // write to file
+  fs.writeFileSync("npcs.json", JSON.stringify(npcs, null, 2), "utf-8");
+  NPC_DATA = npcs;
+  console.log("NPC data saved to npcs.json");
+}
+
+// Don't do quests for now
+function doQuests({ player, units, items, isMule }: Context): Intent | void {
+  if (isMule || true) {
+    // Abandon quests
+    for (const quest of every(player.quests)) {
+      return player.abandonQuest(quest.id);
+    }
+    return 
+  }
+  /*
+  // Turn in quests
+  for (const quest of every(player.quests)) {
+    let stepIdx = 0;
+    while (stepIdx < quest.steps.length) {
+      const nextStep = quest.steps[stepIdx++];
+
+      if (nextStep.type === "turn_in") {
+        if (!nextStep.requiredItems) {
+          const endNpc = nextStep.target;
+          return player.turnInQuest({ id: endNpc } as ClientSideNPC, quest.id);
+        }
+        let enoughItems = true;
+        for (const [item, needs] of Object.entries(nextStep.requiredItems)) {
+          let count = player.inventory[item as Items] ?? 0;
+          if (count < (needs ?? 0)) {
+            enoughItems = false;
+            break;
+          }
+        }
+        if (enoughItems) {
+          const endNpc = nextStep.target;
+          return player.turnInQuest({ id: endNpc } as ClientSideNPC, quest.id);
+        }
+      } else if (nextStep.type === "kill") {
+        // Requirement fulfilled?
+        let allKilled = true;
+        for (const [target, counter] of Object.entries(nextStep.targets)) {
+          if (counter.killed < counter.required) {
+            allKilled = false;
+            break;
+          }
+        }
+        if (!allKilled) {
+          break; // break out of the while loop, we need to kill more
+        }
+      }
+    }
+  }
+
+  // Accept some quests
+  if (count(player.quests) < MAX_QUESTS) {
+    const npcs = every(units).filter((u) => u.npc) as ClientSideNPC[];
+    for (const npc of npcs) {
+      for (const quest of every(npc.availableQuests)) {
+        if (!player.quests[quest.id]) {
+          return player.acceptQuest(npc, quest.id);
+        }
+      }
+    }
+  }
+  */
+}
+
+function doRegenTP({ player, heartbeat }: Context): Intent | void {
+  if (player.tp < 100 && player.hp >= 100) {
+    // Hit myself unarmed to regen TP
+    return player.attack(player);
+  }
+}
+
+/*
 function doTrade({ player, isMule, units, items }: Context): Intent | void {
   // start sending money to main in enough at least 300 coins
   if (isMule && player.inventory.copperCoin! >= 300) {
@@ -165,29 +285,37 @@ function doTrade({ player, isMule, units, items }: Context): Intent | void {
     }
   }
 }
+*/
 
 function doCraftItems({ player, items, isMule }: Context): Intent | void {
   if (isMule) {
     return;
   }
 
-  const wishList: CopperArmor[] = [
-    "copperMailHelm",
-    "copperMailChest",
-    "copperMailBoots",
-    "copperMailGloves",
-    "copperMailLegs",
+  const wishList: { id: CopperArmor; type: "armor" }[] = [
+    { id: "copperMailHelm", type: "armor" },
+    { id: "copperMailChest", type: "armor" },
+    { id: "copperMailBoots", type: "armor" },
+    { id: "copperMailGloves", type: "armor" },
+    { id: "copperMailLegs", type: "armor" },
+    // ,    {id: "copperGreatSword", type: 'weapon'}
   ];
   for (const wish of wishList) {
-    const type = items[wish].type as ArmorType;
+    const type = items[wish.id].type as ArmorType;
 
-    if (
-      !player.equipment[type] &&
-      player.inventory.anvil &&
-      player.inventory.furnace
-    ) {
+    if (player.inventory.anvil && player.inventory.furnace) {
+      if (player.inventory[wish.id]) {
+        continue; // Already have this item
+      }
+      if (wish.type === "armor" && player.equipment[type as ArmorType]) {
+        continue; // Already have this armor piece equipped
+      }
+      // if (wish.type === 'weapon' && player.equipment.hands) {
+      //   continue; // Already have this weapon equipped
+      // }
+
       // Craft wished if we have enough copper coins
-      let ingotsPerWished = recipes[wish].input.copperIngot;
+      let ingotsPerWished = recipes[wish.id].input.copperIngot;
       let chunksPerIngot = recipes.copperIngot.input.chunkOfCopper;
       let coinsPerChunk = recipes.chunkOfCopper.input.copperCoin;
       let totalCoinsNeeded = ingotsPerWished * chunksPerIngot * coinsPerChunk;
@@ -196,9 +324,8 @@ function doCraftItems({ player, items, isMule }: Context): Intent | void {
       totalCoinsNeeded -= (player.inventory.chunkOfCopper ?? 0) * coinsPerChunk;
 
       if ((player.inventory.copperCoin ?? 0) >= totalCoinsNeeded) {
-        console.log("lets craft", wish);
         if ((player.inventory.copperIngot ?? 0) >= ingotsPerWished) {
-          return player.craft(wish, {
+          return player.craft(wish.id, {
             copperIngot: ingotsPerWished,
           });
         }
@@ -218,6 +345,13 @@ function doRespawn({ player, heartbeat }: Context): Intent | void {
     console.log("I died on:", new Date().toISOString());
     console.log("Calories:", player.calories);
     console.log("Coins lost:", player.inventory.copperCoin ?? 0);
+    console.log("history:");
+    // reverse history:
+    prevTickActions.reverse();
+    for (const action of prevTickActions) {
+      console.log(action, "\ttp=", player.tp, "\thp=", player.hp);
+    }
+
     reset();
     return player.respawn();
   }
@@ -246,7 +380,7 @@ function doEat({ player, items }: Context): Intent | void {
       item.type === "food" &&
       item.calories! <= maxCalories - player.calories
     ) {
-      return player.eat(item.id, itemCount - 1);
+      return player.eat(item.id);
     }
   }
 }
@@ -258,18 +392,24 @@ function isAtSpawn({ player }: Context) {
   return distanceToZero < 3;
 }
 
-function doSellTrash({ player, items }: Context): Intent | void {
+function isCoin(item: ItemDefinition): boolean {
+  return item.name.toLowerCase().includes("coin");
+}
+
+function doSellTrash({ player, items, units }: Context): Intent | void {
   for (const itemKey of Object.keys(player.inventory)) {
     const item = items[itemKey as Items];
     const itemCount = player.inventory[itemKey as Items] ?? 0;
     if (
       itemCount > 0 &&
-      (["trash", "food"].includes(item.type) ||
-        (player.equipment.feet && item.type === "feet")) &&
-      !item.name.includes("coin") &&
+      ["trash", "food"].includes(item.type) &&
+      !isCoin(item) &&
       !["furnace", "chunkOfCopper", "copperIngot", "anvil"].includes(item.id)
     ) {
-      return player.sell(item.id, 0, "healer_name");
+      return player.sell({
+        items: {[item.id]: itemCount},
+        to: units[NPC_IDS.healer_name]
+      });
     }
   }
 }
@@ -280,6 +420,7 @@ type CopperArmor =
   | "copperMailBoots"
   | "copperMailGloves"
   | "copperMailLegs";
+// type CopperWeapon = "copperSword" | "copperGreatSword";
 
 type ArmorType = "helm" | "chest" | "legs" | "feet" | "hands";
 
@@ -297,39 +438,32 @@ function doEquipItems({ player, items }: Context): Intent | void {
       return player.equip(wish, type);
     }
   }
+  if ((player.inventory.copperGreatSword ?? 0) > 0) {
+    return player.equip("copperGreatSword", "weapon");
+  }
   if (!player.equipment.weapon && (player.inventory.copperSword ?? 0) > 0) {
     return player.equip("copperSword", "weapon");
   }
   if (!player.equipment.offhand && (player.inventory.woodenShield ?? 0) > 0) {
     return player.equip("woodenShield", "offhand");
   }
-
-  // For the mule
-  if (!player.equipment.weapon && (player.inventory.woodenArrow ?? 0) > 0) {
-    return player.equip("woodenBow", "weapon");
-  }
 }
 
-function doBuyItems({ player, items, isMule }: Context): Intent | void {
+function doBuyItems({ player, items, isMule, units}: Context): Intent | void {
   if (isMule) {
     if (
       !player.equipment.weapon &&
-      player.inventory.copperCoin! >= items.copperSword.buyFromVendorPrice
+      player.inventory.basicGrimmoire! >=
+        items.basicGrimmoire.buyFromVendorPrice
     ) {
-      return player.buy("copperSword", 1, "guard_name");
+      return player.buy({items: {"basicGrimmoire": 1}, from: units[NPC_IDS["healer_name"]]});
     }
-    // if (
-    //   !player.equipment.weapon &&
-    //   player.inventory.copperCoin! >= items.woodenArrow.buyFromVendorPrice * 100
-    // ) {
-    //   return player.buy("woodenArrow", 100, "healer_name");
-    // }
-    // if (
-    //   !player.equipment.weapon &&
-    //   player.inventory.copperCoin! >= items.woodenBow.buyFromVendorPrice
-    // ) {
-    //   return player.buy("woodenBow", 1, "healer_name");
-    // }
+    if (
+      !player.equipment.weapon &&
+      player.inventory.minorManaRing! >= items.minorManaRing.buyFromVendorPrice
+    ) {
+      return player.buy({items: {"minorManaRing": 1}, from: units[NPC_IDS["healer_name"]]});
+    }
     return;
   }
 
@@ -337,30 +471,48 @@ function doBuyItems({ player, items, isMule }: Context): Intent | void {
     !player.equipment.weapon &&
     player.inventory.copperCoin! >= items.copperSword.buyFromVendorPrice
   ) {
-    return player.buy("copperSword", 1, "guard_name");
+    return player.buy({items: {"copperSword": 1}, from: units[NPC_IDS["guard_name"]]});
   }
 
   if (
     !player.equipment.offhand &&
     player.inventory.copperCoin! >= items.woodenShield.buyFromVendorPrice
   ) {
-    return player.buy("woodenShield", 1, "healer_name");
+    return player.buy({items: {"woodenShield": 1}, from: units[NPC_IDS["healer_name"]]});
   }
   if (
     !player.inventory.furnace &&
     player.inventory.copperCoin! >= items.furnace.buyFromVendorPrice
   ) {
-    return player.buy("furnace", 1, "healer_name");
+    return player.buy({items: {"furnace": 1}, from: units[NPC_IDS["healer_name"]]});
   }
   if (
     !player.inventory.anvil &&
     player.inventory.copperCoin! >= items.anvil.buyFromVendorPrice
   ) {
-    return player.buy("anvil", 1, "healer_name");
+    return player.buy({items: {"anvil": 1}, from: units[NPC_IDS["healer_name"]]});
   }
 }
 
-function doDropExcessItems({ player, items }: Context): Intent | void {
+function doSetSpellStones({ player, isMule, items }: Context): Intent | void {
+  if (!isMule) {
+    return;
+  }
+
+  if (
+    (player.equipment.hands?.includes("basicGrimmoire") ||
+      player.inventory.basicGrimmoire) &&
+    player.inventory.aid_digestion! > 0
+  ) {
+    return player.setSpellStones(
+      "basicGrimmoire",
+      ["aid_digestion"],
+      "Digestion Tome"
+    );
+  }
+}
+
+function doDropExcessItems({ player, isMule, items }: Context): Intent | void {
   const itemKeys = Object.keys(player.inventory);
   const currentWeight = getCurrentWeight(player.inventory, items);
   if (currentWeight >= maxCarryWeight) {
@@ -368,14 +520,26 @@ function doDropExcessItems({ player, items }: Context): Intent | void {
       const item = items[itemKey as Items];
       if (
         ["trash", "food"].includes(item.type) &&
-        !item.name.includes("coin")
+        !isCoin(item)
       ) {
-        return player.drop(item.id, 0);
+        return player.drop({item: item.id, amount: player.inventory[item.id]!});
       }
     }
   }
+
+  if (player.inventory.copperCoin! >= 30000) {
+    // I'm full, I will die of hunger soon
+    return player.drop({item: "copperCoin", amount:  20000});
+  }
+
+  if (isMule) {
+    if (player.inventory["aid_digestion"]! > 1) {
+      return player.drop({item: "aid_digestion", amount: 1});
+    }
+  }
+
   if (player.inventory["aid_digestion"]) {
-    return player.drop("aid_digestion", 0);
+    return player.drop({item: "aid_digestion", amount: 1});
   }
 }
 
@@ -390,6 +554,7 @@ function doHunt({
   player,
   units,
   items,
+  isMule,
   heartbeat,
 }: Context): Intent | void {
   for (const [k, v] of Object.entries(units)) {
@@ -407,27 +572,24 @@ function doHunt({
         !player.equipment.weapon &&
         player.tp >= weaponSkills.haymaker.tpCost
       ) {
-        return player.useWeaponSkill("haymaker", k);
+        return player.useWeaponSkill({skill: "haymaker", target: v});
       }
 
       if (
         items[player.equipment.weapon!]?.type === "oneHandedSword" &&
         player.tp >= weaponSkills.doubleSlash.tpCost
       ) {
-        // In case of server desync, use skill only 90% of the times
-        if (Math.random() < 0.9) {
-          return player.useWeaponSkill("doubleSlash", k);
-        }
+        return player.useWeaponSkill({skill: "doubleSlash", target: v});
       }
 
-      return player.attack(k);
+      return player.attack(v);
     }
   }
 }
 
 function doGoToWilderness({ player, isMule }: Context): Intent | void {
   if (player.equipment.weapon && player.equipment.offhand) {
-    return player.move({ x: 35, y: 0 }); // 35 because Tyr is stuck, we can ninja all his loot
+    return player.move({ x: 40, y: 0 });
   }
 
   if (isMule) {
@@ -437,7 +599,8 @@ function doGoToWilderness({ player, isMule }: Context): Intent | void {
   return player.move({ x: 50, y: 0 });
 }
 
-let prevTickAction: Intent | void | null = null;
+let prevTickActions: (Intent | "none")[] = [];
+const HISTORY_LENGTH = 10;
 
 connect({
   credentials: {
@@ -446,20 +609,24 @@ connect({
   },
   onTick(heartbeat) {
     const action = getTickAction(heartbeat);
+
     if (!heartbeat.inArena) {
-      if (isDifferent(action, prevTickAction)) {
+      const lastAction = prevTickActions[0];
+      if (isDifferent(action, lastAction)) {
         console.log(
           action,
-          "tp=",
+          "\ttp=",
           heartbeat.player.tp,
-          "hp=",
-          heartbeat.player.hp,
-          // 'lastAction=',
-          // heartbeat.player.lastAction, heartbeat.player.lastUpdate
+          "\thp=",
+          Math.round(heartbeat.player.hp)
         );
+        prevTickActions = [
+          action ?? "none",
+          ...prevTickActions.slice(0, HISTORY_LENGTH - 1),
+        ];
       }
-      prevTickAction = action;
     }
+
     return action;
   },
   onEvent(instance, charId, eventName, evt) {
